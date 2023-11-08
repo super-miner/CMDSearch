@@ -8,6 +8,7 @@ public class CMDObject {
     private bool _logProcessOutput;
     
     private Process _process;
+    private string _processOutput = "";
     private StreamReader _processReader;
     private StreamWriter _processWriter;
     private Task _readerTask;
@@ -29,15 +30,50 @@ public class CMDObject {
         processInfo.RedirectStandardInput = true;
         processInfo.RedirectStandardOutput = true;
 
-        _process = Process.Start(processInfo) ?? throw new NullReferenceException();
+        _process = new Process();
+        _process.StartInfo = processInfo;
         
+        _process.OutputDataReceived += OnOutputChanged;
         _process.Exited += OnProcessExited;
-        _process.Disposed += OnProcessExited;
-
-        _processReader = _process.StandardOutput;
+        
+        _process.Start();
+        
+        _process.BeginOutputReadLine();
         _processWriter = _process.StandardInput;
+    }
 
-        WatchStream();
+    public void OnOutputChanged(object? sender, DataReceivedEventArgs args) {
+        string data = args.Data;
+        
+        if (!string.IsNullOrEmpty(data)) {
+            _processOutput += $"{data}\n";
+            
+            if (_logProcessOutput) {
+                Debug.WriteLine("\n-------- PROCESS START --------");
+                Debug.WriteLine(_processOutput);
+                Debug.WriteLine("------- PROCESS CURRENT -------\n");
+            }
+            
+            foreach (CMDCallback callback in _callbacks) {
+                MatchCollection matches = callback.Trigger.Matches(_processOutput);
+                
+                if (matches.Count <= callback.MatchesFound) {
+                    continue;
+                }
+                int matchesLengthDelta = matches.Count - callback.MatchesFound;
+                IEnumerable<Match> matchesDelta = matches.Skip(Math.Max(0, matches.Count - matchesLengthDelta));
+                    
+                foreach (Match match in matchesDelta) {
+                    if (match.Success) {
+                        Debug.WriteLine("Attempting to call callback");
+                        
+                        callback.Callback.Invoke(match);
+                    }
+                }
+                    
+                callback.MatchesFound = matches.Count;
+            }
+        } 
     }
 
     public void AddCallback(string trigger, Action<Match> callback) {
@@ -55,79 +91,6 @@ public class CMDObject {
     public void WriteInput(string input) {
         _processWriter.WriteLine(input);
     }
-    
-    private void WatchStream() {
-        SynchronizationContext mainThreadContext = SynchronizationContext.Current;
-        
-        _readerTask = Task.Run(() => {
-            string accumulator = "";
-            
-            while (true) {
-                _threadStateMutex.WaitOne();
-                if (closeThread) {
-                    closeThread = false;
-                    
-                    break;
-                }
-                _threadStateMutex.ReleaseMutex();
-                
-                Debug.WriteLine("Debug 1");
-
-                bool accumulatorChanged = false;
-                while (true) {
-                    int characterCode = _processReader.Read();
-
-                    if (characterCode == -1) {
-                        Debug.WriteLine("Debug A");
-                        
-                        break;
-                    }
-                    
-                    Debug.WriteLine("Debug B, " + characterCode);
-
-                    char character = (char)characterCode;
-
-                    accumulator += character;
-                    accumulatorChanged = true;
-
-                    Debug.WriteLine("Debug 2");
-                }
-                
-                Debug.WriteLine("Debug 3");
-
-                if (_logProcessOutput && accumulatorChanged) {
-                    Debug.WriteLine("\n-------- PROCESS START --------");
-                    Debug.WriteLine(accumulator);
-                    Debug.WriteLine("------- PROCESS CURRENT -------\n");
-                }
-
-                _readerMutex.WaitOne();
-
-                foreach (CMDCallback callback in _callbacks) {
-                    MatchCollection matches = callback.Trigger.Matches(accumulator);
-                    
-                    if (matches.Count <= callback.MatchesFound) {
-                        continue;
-                    }
-
-                    int matchesLengthDelta = matches.Count - callback.MatchesFound;
-                    IEnumerable<Match> matchesDelta = matches.Skip(Math.Max(0, matches.Count - matchesLengthDelta));
-                    
-                    foreach (Match match in matchesDelta) { 
-                        if (match.Success) {
-                            mainThreadContext.Post(_ => {
-                                callback.Callback.Invoke(match);
-                            }, null);
-                        }
-                    }
-                    
-                    callback.MatchesFound = matches.Count;
-                }
-                
-                _readerMutex.ReleaseMutex();
-            }
-        });
-    }
 
     public void Destroy() {
         _threadStateMutex.WaitOne();
@@ -137,7 +100,6 @@ public class CMDObject {
         _threadStateMutex.ReleaseMutex();
         
         _processWriter.Close();
-        _processReader.Close();
         _process.Close();
     }
     
