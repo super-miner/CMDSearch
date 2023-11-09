@@ -9,6 +9,7 @@ public class CMDObject {
     
     private Process _process;
     private string _processOutput = "";
+    private SynchronizationContext _callbackThreadContext;
     private StreamReader _processReader;
     private StreamWriter _processWriter;
     private Task _readerTask;
@@ -29,17 +30,23 @@ public class CMDObject {
         processInfo.UseShellExecute = false;
         processInfo.RedirectStandardInput = true;
         processInfo.RedirectStandardOutput = true;
+        processInfo.RedirectStandardError = true;
 
         _process = new Process();
         _process.StartInfo = processInfo;
         
         _process.OutputDataReceived += OnOutputChanged;
+        _process.ErrorDataReceived += OnError;
         _process.Exited += OnProcessExited;
         
         _process.Start();
         
         _process.BeginOutputReadLine();
         _processWriter = _process.StandardInput;
+    }
+
+    public void OnError(object? sender, DataReceivedEventArgs args) {
+        Debug.WriteLine("Possible Error???");
     }
 
     public void OnOutputChanged(object? sender, DataReceivedEventArgs args) {
@@ -49,10 +56,12 @@ public class CMDObject {
             _processOutput += $"{data}\n";
             
             if (_logProcessOutput) {
-                Debug.WriteLine("\n-------- PROCESS START --------");
+                Debug.WriteLine("\n-------- PROCESS START --------\n");
                 Debug.WriteLine(_processOutput);
                 Debug.WriteLine("------- PROCESS CURRENT -------\n");
             }
+            
+            _readerMutex.WaitOne();
             
             foreach (CMDCallback callback in _callbacks) {
                 MatchCollection matches = callback.Trigger.Matches(_processOutput);
@@ -65,14 +74,16 @@ public class CMDObject {
                     
                 foreach (Match match in matchesDelta) {
                     if (match.Success) {
-                        Debug.WriteLine("Attempting to call callback");
-                        
-                        callback.Callback.Invoke(match);
+                        _callbackThreadContext.Post(_ => {
+                            callback.Callback.Invoke(match);
+                        }, null);
                     }
                 }
                     
                 callback.MatchesFound = matches.Count;
             }
+            
+            _readerMutex.ReleaseMutex();
         } 
     }
 
@@ -86,6 +97,8 @@ public class CMDObject {
         _callbacks.Add(new CMDCallback(0, trigger, callback));
         
         _readerMutex.ReleaseMutex();
+
+        _callbackThreadContext = SynchronizationContext.Current;
     }
 
     public void WriteInput(string input) {
